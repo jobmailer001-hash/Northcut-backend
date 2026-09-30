@@ -1,0 +1,57 @@
+/**
+ * Actions recorded in UserLogs — something a person did (customer or admin).
+ * @type {Readonly<Record<string, string>>}
+ */
+export const UserLogActions = {
+  SIGNUP: "SIGNUP",
+  LOGIN: "LOGIN",
+  LOGIN_FAILED: "LOGIN_FAILED",
+  LOGOUT: "LOGOUT",
+  PASSWORD_RESET_REQUESTED: "PASSWORD_RESET_REQUESTED",
+  PASSWORD_RESET_COMPLETED: "PASSWORD_RESET_COMPLETED",
+  PASSWORD_CHANGED: "PASSWORD_CHANGED",
+  PROFILE_UPDATED: "PROFILE_UPDATED",
+  ORDER_PLACED: "ORDER_PLACED",
+  ORDER_CANCELLED: "ORDER_CANCELLED",
+  ORDER_ADDRESS_CHANGED: "ORDER_ADDRESS_CHANGED",
+  // Admin actions on the catalog
+  PRODUCT_CREATED: "PRODUCT_CREATED",
+  PRODUCT_UPDATED: "PRODUCT_UPDATED",
+  PRODUCT_STOCK_ADJUSTED: "PRODUCT_STOCK_ADJUSTED",
+  PRODUCT_IMAGES_ADDED: "PRODUCT_IMAGES_ADDED",
+  PRODUCT_IMAGE_REMOVED: "PRODUCT_IMAGE_REMOVED",
+  // Admin actions on orders and customers
+  ORDER_SHIPPED: "ORDER_SHIPPED",
+  ORDER_DELIVERED: "ORDER_DELIVERED",
+  ORDER_CANCELLED_BY_ADMIN: "ORDER_CANCELLED_BY_ADMIN",
+  CUSTOMER_DISABLED: "CUSTOMER_DISABLED",
+  CUSTOMER_ENABLED: "CUSTOMER_ENABLED",
+  // Admin actions on site settings
+  SITE_SETTINGS_UPDATED: "SITE_SETTINGS_UPDATED",
+  SITE_HERO_IMAGE_UPDATED: "SITE_HERO_IMAGE_UPDATED",
+  SITE_HERO_IMAGE_REMOVED: "SITE_HERO_IMAGE_REMOVED",
+};
+
+/**
+ * Severity of a SystemLog entry.
+ * @type {Readonly<Record<string, string>>}
+ */
+export const LogLevels = {
+  INFO: "info",
+  WARN: "warn",
+  ERROR: "error",
+};
+
+/**
+ * Events recorded in SystemLogs — something the system did on its own (jobs, webhooks).
+ * @type {Readonly<Record<string, string>>}
+ */
+export const SystemLogEvents = {
+  ORDER_EXPIRED: "ORDER_EXPIRED",
+  ORDER_PAID: "ORDER_PAID",
+  PAYMENT_FAILED: "PAYMENT_FAILED",
+  PAYMENT_NOT_APPLICABLE: "PAYMENT_NOT_APPLICABLE",
+  REFUND_SUCCEEDED: "REFUND_SUCCEEDED",
+  REFUND_FAILED: "REFUND_FAILED",
+  INVENTORY_COUNTER_DRIFT: "INVENTORY_COUNTER_DRIFT",
+};

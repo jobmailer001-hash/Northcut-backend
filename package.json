@@ -1,0 +1,64 @@
+{
+  "name": "northcut-backend",
+  "version": "1.0.0",
+  "description": "an MVP backend for northcut brand",
+  "homepage": "https://github.com/megamindcodex/Northcut-backend#readme",
+  "bugs": {
+    "url": "https://github.com/megamindcodex/Northcut-backend/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/megamindcodex/Northcut-backend.git"
+  },
+  "license": "ISC",
+  "author": "megamindcodex",
+  "type": "module",
+  "main": "src/index.js",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "node --watch src/index.js",
+    "dev:worker": "node --watch src/worker.js",
+    "start": "node src/index.js",
+    "start:worker": "node src/worker.js",
+    "seed:admin": "node src/db/mongodb/seeders/admin.seeder.js",
+    "seed:products": "node src/db/mongodb/seeders/products.seeder.js"
+  },
+  "imports": {
+    "#controllers/*": "./src/app/controllers/*",
+    "#routes/*": "./src/app/routes/*",
+    "#handlers/*": "./src/app/handlers/*",
+    "#repositories/*": "./src/app/repositories/*",
+    "#models/*": "./src/db/mongodb/models/*",
+    "#middlewares/*": "./src/app/middlewares/*",
+    "#validators/*": "./src/app/validators/*",
+    "#providers/*": "./src/app/providers/*",
+    "#queues/*": "./src/app/queues/*",
+    "#errors/*": "./src/app/errors/*",
+    "#utils/*": "./src/app/utils/*",
+    "#constants/*": "./src/app/constants/*",
+    "#bootstrap/*": "./src/bootstrap/*",
+    "#configs/*": "./src/configs/*",
+    "#db/*": "./src/db/*",
+    "#workers/*": "./src/workers/*"
+  },
+  "dependencies": {
+    "bcrypt": "^6.0.0",
+    "bullmq": "^6.3.9",
+    "cloudinary": "^2.11.0",
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.6",
+    "dotenv": "^18.0.4",
+    "express": "^5.2.1",
+    "helmet": "^8.3.0",
+    "ioredis": "^6.0.0",
+    "jsonwebtoken": "^9.0.3",
+    "mongoose": "^9.10.2",
+    "multer": "^2.4.0",
+    "swagger-ui-express": "^5.0.1",
+    "uuid": "^14.0.2",
+    "winston": "^3.19.0",
+    "zod": "^4.6.5"
+  }
+}

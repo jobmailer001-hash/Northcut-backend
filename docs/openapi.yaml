@@ -1,0 +1,2395 @@
+# Northcut API — the single source of truth for every endpoint.
+#
+# Hand-written. Any change to a route's inputs (body, params, query, headers), outputs,
+# data types, auth requirement or error codes MUST be made here in the same change
+# (see CLAUDE.md §10.1). Served at /api/docs (Swagger UI) and /api/docs/openapi.yaml (raw).
+#
+# Layout: `paths` describe each endpoint and point at shared shapes with $ref;
+# every shape lives once under `components/schemas`.
+# All money is an integer in minor units (kobo): ₦12,500.00 = 1250000.
+
+openapi: 3.1.0
+info:
+  title: Northcut API
+  version: 1.0.0
+  description: |
+    Northcut e-commerce MVP.
+
+    - Success responses are `{ "data": { … } }`; failures are `{ "error": { "code", "message", "details?" } }`.
+      The HTTP status is the success/failure signal.
+    - Logged-in routes need `Authorization: Bearer <accessToken>` (from login/signup/refresh).
+    - The refresh token is an httpOnly cookie scoped to `/api/v1/auth`.
+    - Money is always an integer in kobo.
+servers:
+  - url: /api/v1
+
+tags:
+  - name: System
+  - name: Auth
+  - name: Me
+  - name: Products
+  - name: Cart
+  - name: Orders
+  - name: Webhooks
+  - name: Mock gateway (dev only)
+  - name: Admin · Products
+  - name: Admin · Orders
+  - name: Admin · Transactions
+  - name: Admin · Customers
+  - name: Admin · Overview
+  - name: Site settings
+  - name: Admin · Site settings
+
+paths:
+  # ───────────────────────────── System ─────────────────────────────
+  /health:
+    get:
+      tags: [System]
+      summary: Service health
+      security: []
+      description: Public. Reports whether MongoDB and Redis are reachable.
+      responses:
+        "200":
+          description: All services reachable.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HealthResponse" }
+        "503":
+          description: One or more services unreachable (status `degraded`).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HealthResponse" }
+
+  # ───────────────────────────── Auth ─────────────────────────────
+  /auth/signup:
+    post:
+      tags: [Auth]
+      summary: Create a customer account
+      security: []
+      description: Public. Creates a CUSTOMER account and logs it in. Sets the `refreshToken` httpOnly cookie.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SignupInput" }
+      responses:
+        "201":
+          description: Account created and logged in.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionResponse" }
+        "409": { $ref: "#/components/responses/EmailAlreadyRegistered" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Log in
+      security: []
+      description: Public. Sets the `refreshToken` httpOnly cookie.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LoginInput" }
+      responses:
+        "200":
+          description: Logged in.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionResponse" }
+        "401":
+          description: "`INVALID_CREDENTIALS` — email or password is wrong."
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "403":
+          description: "`ACCOUNT_DISABLED` — correct password, but the account is disabled."
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Get a new access token
+      security: []
+      description: |
+        Uses the `refreshToken` cookie (sent automatically with credentials). The refresh token is not rotated.
+        Called on page load to restore the session, and on any 401.
+      responses:
+        "200":
+          description: New access token issued.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionResponse" }
+        "401":
+          description: "`UNAUTHORIZED` — no cookie, session expired/revoked, or account disabled. Clears the cookie."
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: Log out
+      security: []
+      description: Deletes the session for the `refreshToken` cookie and clears it. Always succeeds.
+      responses:
+        "204": { description: Logged out. }
+
+  /auth/password:
+    patch:
+      tags: [Auth]
+      summary: Change password
+      description: |
+        Logged in (any role). Checks the current password, sets the new one, and logs out every other device.
+        The current device stays logged in — it's identified by the `refreshToken` cookie, which is why this lives under /auth.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ChangePasswordInput" }
+      responses:
+        "204": { description: Password changed. }
+        "400":
+          description: "`INVALID_CURRENT_PASSWORD`"
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /auth/password-reset/request:
+    post:
+      tags: [Auth]
+      summary: Send a password-reset code
+      security: []
+      description: |
+        Public. Emails a 6-digit code if an active account uses the email.
+        Responds 204 either way, so it can't be used to discover registered emails.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PasswordResetRequestInput" }
+      responses:
+        "204": { description: Request accepted. }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /auth/password-reset/verify:
+    post:
+      tags: [Auth]
+      summary: Verify a password-reset code
+      security: []
+      description: Public. Exchanges a valid code for a single-use reset token (~15 min). 5 wrong guesses discard the code.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PasswordResetVerifyInput" }
+      responses:
+        "200":
+          description: Code accepted.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [resetToken]
+                    properties:
+                      resetToken: { type: string, format: uuid }
+        "400":
+          description: "`INVALID_RESET_CODE` — wrong, expired, or out of attempts."
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /auth/password-reset/complete:
+    post:
+      tags: [Auth]
+      summary: Set a new password
+      security: []
+      description: Public. Sets the password using the reset token, then logs the user out of every session.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PasswordResetCompleteInput" }
+      responses:
+        "204": { description: Password changed. }
+        "400":
+          description: "`INVALID_RESET_TOKEN` — invalid, expired, or already used."
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  # ───────────────────────────── Me ─────────────────────────────
+  /me:
+    get:
+      tags: [Me]
+      summary: Get my profile
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: The profile.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProfileResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    patch:
+      tags: [Me]
+      summary: Update my profile
+      description: Only `name` can change (unknown keys are rejected). To change the password use `PATCH /auth/password`.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateProfileInput" }
+      responses:
+        "200":
+          description: Profile updated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProfileResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /me/addresses:
+    get:
+      tags: [Me]
+      summary: List my addresses
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200": { $ref: "#/components/responses/Addresses" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      tags: [Me]
+      summary: Add an address
+      description: Up to 10. The first address, or one sent with `isDefault true`, becomes the default.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AddressInput" }
+      responses:
+        "201": { $ref: "#/components/responses/Addresses" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409":
+          description: "`ADDRESS_LIMIT_REACHED`, or `ADDRESS_LABEL_TAKEN` — another saved address has this label; `details.label`."
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /me/addresses/{addressId}:
+    parameters:
+      - $ref: "#/components/parameters/AddressId"
+    patch:
+      tags: [Me]
+      summary: Edit an address / set default
+      description: "`isDefault true` makes it the default; `false` is ignored (pick another address as default instead)."
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AddressUpdateInput" }
+      responses:
+        "200": { $ref: "#/components/responses/Addresses" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/AddressNotFound" }
+        "409":
+          description: "`ADDRESS_LABEL_TAKEN` — another saved address has this label; `details.label`."
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "422": { $ref: "#/components/responses/ValidationError" }
+    delete:
+      tags: [Me]
+      summary: Delete an address
+      description: If it was the default, the next remaining address becomes default.
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200": { $ref: "#/components/responses/Addresses" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/AddressNotFound" }
+
+  /me/favourites:
+    get:
+      tags: [Me]
+      summary: List my favourites
+      description: Only products that are still public.
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Favourite products.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [products]
+                    properties:
+                      products:
+                        type: array
+                        items: { $ref: "#/components/schemas/PublicProduct" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /me/favourites/{sku}:
+    parameters:
+      - $ref: "#/components/parameters/Sku"
+    put:
+      tags: [Me]
+      summary: Add a favourite
+      description: Idempotent.
+      security: [{ bearerAuth: [] }]
+      responses:
+        "204": { description: Added (or already a favourite). }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404":
+          description: "`PRODUCT_NOT_FOUND` — no public product has this SKU."
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    delete:
+      tags: [Me]
+      summary: Remove a favourite
+      description: Idempotent.
+      security: [{ bearerAuth: [] }]
+      responses:
+        "204": { description: Removed (or wasn't a favourite). }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  # ───────────────────────────── Products ─────────────────────────────
+  /products:
+    get:
+      tags: [Products]
+      summary: List products
+      security: []
+      description: Public. PUBLIC products only, newest first. Optional tag filter.
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 50, default: 12 }
+        - name: tag
+          in: query
+          schema: { type: string, minLength: 1, maxLength: 30 }
+          description: Lowercased before matching.
+      responses:
+        "200":
+          description: A page of products.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [products, pagination]
+                    properties:
+                      products:
+                        type: array
+                        items: { $ref: "#/components/schemas/PublicProduct" }
+                      pagination: { $ref: "#/components/schemas/Pagination" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /products/{slug}:
+    get:
+      tags: [Products]
+      summary: Get a product
+      security: []
+      description: Public. Hidden products return 404.
+      parameters:
+        - $ref: "#/components/parameters/Slug"
+      responses:
+        "200":
+          description: The product.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [product]
+                    properties:
+                      product: { $ref: "#/components/schemas/PublicProduct" }
+        "404": { $ref: "#/components/responses/ProductNotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  # ───────────────────────────── Cart ─────────────────────────────
+  /cart/preview:
+    post:
+      tags: [Cart]
+      summary: Preview a cart
+      security: []
+      description: |
+        Public. Validates `[{ sku, quantity }]` against live data and returns every line, every issue,
+        and totals over the issue-free lines. Nothing is reserved or saved.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [items]
+              properties:
+                items:
+                  type: array
+                  maxItems: 50
+                  description: Unique SKUs. May be empty.
+                  items: { $ref: "#/components/schemas/CartItem" }
+      responses:
+        "200":
+          description: The preview.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [preview]
+                    properties:
+                      preview: { $ref: "#/components/schemas/CartPreview" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  # ───────────────────────────── Orders ─────────────────────────────
+  /orders:
+    post:
+      tags: [Orders]
+      summary: Place an order
+      description: |
+        Validates the whole cart, then reserves every item and creates the order (PENDING_PAYMENT) in one transaction.
+        The order holds its stock until `expiresAt`, then expires. Send `shippingAddressId` or `shippingAddress` (exactly one).
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PlaceOrderInput" }
+      responses:
+        "201": { $ref: "#/components/responses/PlacedOrder" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/AddressNotFound" }
+        "422":
+          description: |
+            `CART_REQUIRES_UPDATE` — nothing was created; `details` is `{ items: CartLine[], issues: ItemIssue[] }`
+            with fresh data (same shapes as the cart preview). | `VALIDATION_ERROR`
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    get:
+      tags: [Orders]
+      summary: List my orders
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 50, default: 10 }
+      responses:
+        "200":
+          description: A page of orders, newest first.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [orders, pagination]
+                    properties:
+                      orders:
+                        type: array
+                        items: { $ref: "#/components/schemas/OrderSummary" }
+                      pagination: { $ref: "#/components/schemas/Pagination" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /orders/preorder:
+    post:
+      tags: [Orders]
+      summary: Place a pre-order
+      description: Single item at the pre-order price. Claims pre-order spots in one transaction.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PlacePreorderInput" }
+      responses:
+        "201": { $ref: "#/components/responses/PlacedOrder" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/AddressNotFound" }
+        "409":
+          description: |
+            `PREORDER_UNAVAILABLE` — `details.reason`: NOT_FOUND | NOT_AVAILABLE | NOT_PRE_ORDER | INVALID_QUANTITY |
+            INSUFFICIENT_QUANTITY (with `details.availableQuantity`).
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /orders/{orderNumber}:
+    get:
+      tags: [Orders]
+      summary: Get one of my orders
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/OrderNumber"
+      responses:
+        "200": { $ref: "#/components/responses/Order" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/OrderNotFound" }
+
+  /orders/{orderNumber}/payment:
+    post:
+      tags: [Orders]
+      summary: Pay for an order (start or retry)
+      description: Only while PENDING_PAYMENT (`canPay` on the order). Each call is a new payment attempt with its own reference.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/OrderNumber"
+      responses:
+        "201":
+          description: Payment started — redirect the customer to `checkoutUrl`.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [payment]
+                    properties:
+                      payment: { $ref: "#/components/schemas/PaymentStart" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/OrderNotFound" }
+        "409":
+          description: "`PAYMENT_NOT_ALLOWED` — not awaiting payment; `details.status` is the current status."
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  /orders/{orderNumber}/cancel:
+    post:
+      tags: [Orders]
+      summary: Cancel an order
+      description: |
+        Any time while PENDING_PAYMENT, or within 24h of payment if not shipped. Returns its stock immediately;
+        a paid order is refunded in the background. `canCancel` on the order says whether this is allowed.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/OrderNumber"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CancelOrderInput" }
+      responses:
+        "200": { $ref: "#/components/responses/Order" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/OrderNotFound" }
+        "409": { $ref: "#/components/responses/OrderNotCancellable" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /orders/{orderNumber}/shipping-address:
+    patch:
+      tags: [Orders]
+      summary: Change an order's shipping address
+      description: |
+        Replaces where the order ships, from a saved address or a one-off address (never saved to the address
+        book). Allowed while PENDING_PAYMENT or PAID — until the order ships. `canChangeAddress` on the order says
+        whether this is allowed.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/OrderNumber"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ShippingTarget" }
+      responses:
+        "200": { $ref: "#/components/responses/Order" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404":
+          description: "`ORDER_NOT_FOUND`, or `ADDRESS_NOT_FOUND` — the saved address id isn't in your address book."
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "409":
+          description: "`ORDER_ADDRESS_LOCKED` — shipped, delivered, cancelled or expired; `details.status` is the current status."
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  # ───────────────────────────── Webhooks ─────────────────────────────
+  /webhooks/payments:
+    post:
+      tags: [Webhooks]
+      summary: Payment provider events
+      security: []
+      description: |
+        Called by the payment provider. The `x-payment-signature` header must be the HMAC-SHA256 (hex) of the
+        raw body with PAYMENT_WEBHOOK_SECRET. The event is queued and processed by the worker, which re-verifies
+        the payment with the provider. Duplicate events are harmless.
+      parameters:
+        - name: x-payment-signature
+          in: header
+          required: true
+          schema: { type: string, pattern: "^[a-fA-F0-9]{64}$" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PaymentWebhookEvent" }
+      responses:
+        "200":
+          description: Event accepted.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [received]
+                    properties:
+                      received: { type: boolean, const: true }
+        "401":
+          description: "`INVALID_WEBHOOK_SIGNATURE`"
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "422":
+          description: "`VALIDATION_ERROR` — unrecognised payload."
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  # ───────────────────────────── Mock gateway (dev only) ─────────────────────────────
+  /mock-gateway/payments/{reference}:
+    get:
+      tags: [Mock gateway (dev only)]
+      summary: Get a fake payment
+      security: []
+      description: Backs the fake checkout page. Only exists with PAYMENT_PROVIDER=mock outside production.
+      parameters:
+        - $ref: "#/components/parameters/PaymentReference"
+      responses:
+        "200":
+          description: The fake payment.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [payment]
+                    properties:
+                      payment: { $ref: "#/components/schemas/MockPayment" }
+        "404": { $ref: "#/components/responses/PaymentNotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /mock-gateway/payments/{reference}/complete:
+    post:
+      tags: [Mock gateway (dev only)]
+      summary: Pay or fail a fake payment
+      security: []
+      description: Settles the payment and sends a signed webhook to `POST /webhooks/payments`, like a real provider.
+      parameters:
+        - $ref: "#/components/parameters/PaymentReference"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [outcome]
+              properties:
+                outcome: { type: string, enum: [success, failure] }
+      responses:
+        "200":
+          description: Settled.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [result]
+                    properties:
+                      result:
+                        type: object
+                        required: [status, returnUrl]
+                        properties:
+                          status: { $ref: "#/components/schemas/TransactionStatus" }
+                          returnUrl: { type: string, format: uri }
+        "404": { $ref: "#/components/responses/PaymentNotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  # ───────────────────────────── Admin · Products ─────────────────────────────
+  /admin/products:
+    get:
+      tags: [Admin · Products]
+      summary: List all products
+      description: ADMIN. Includes hidden products. Search matches name or SKU.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Limit20"
+        - name: search
+          in: query
+          schema: { type: string, maxLength: 100 }
+        - name: tag
+          in: query
+          schema: { type: string, minLength: 1, maxLength: 30 }
+          description: Lowercased before matching.
+        - name: availabilityStatus
+          in: query
+          schema: { $ref: "#/components/schemas/AvailabilityStatus" }
+        - name: publicityStatus
+          in: query
+          schema: { $ref: "#/components/schemas/PublicityStatus" }
+      responses:
+        "200":
+          description: A page of products.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [products, pagination]
+                    properties:
+                      products:
+                        type: array
+                        items: { $ref: "#/components/schemas/AdminProduct" }
+                      pagination: { $ref: "#/components/schemas/Pagination" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+    post:
+      tags: [Admin · Products]
+      summary: Create a product
+      description: ADMIN. SKU is permanent. Slug defaults to a slug of the name. New products are HIDDEN and OUT_OF_STOCK by default.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateProductInput" }
+      responses:
+        "201": { $ref: "#/components/responses/AdminProduct" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409":
+          description: "`SKU_ALREADY_EXISTS` | `SLUG_ALREADY_EXISTS`"
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "422":
+          description: "`VALIDATION_ERROR` | `PREORDER_PRICE_REQUIRED` — PRE_ORDER needs a pre-order price."
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  /admin/products/by-slug/{slug}:
+    parameters:
+      - $ref: "#/components/parameters/Slug"
+    get:
+      tags: [Admin · Products]
+      summary: Get a product by slug
+      description: ADMIN. Includes hidden products — lets the storefront's `/products/:slug` pages load the full product for an admin.
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200": { $ref: "#/components/responses/AdminProduct" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/ProductNotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /admin/products/{id}:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    get:
+      tags: [Admin · Products]
+      summary: Get a product
+      description: ADMIN.
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200": { $ref: "#/components/responses/AdminProduct" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/ProductNotFound" }
+    patch:
+      tags: [Admin · Products]
+      summary: Update product details
+      description: |
+        ADMIN. Any subset of details, pricing, availability, publicity and pre-order limit.
+        `sku` and stock can't be changed here (unknown keys are rejected).
+        PRE_ORDER → IN_STOCK with claimed spots converts them into reserved stock (stock must cover them).
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateProductInput" }
+      responses:
+        "200": { $ref: "#/components/responses/AdminProduct" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/ProductNotFound" }
+        "409":
+          description: |
+            `SLUG_ALREADY_EXISTS` | `PREORDER_LIMIT_BELOW_RESERVED` — limit lower than claimed spots |
+            `PREORDERS_PENDING` — can't go PRE_ORDER → OUT_OF_STOCK while spots are claimed |
+            `INSUFFICIENT_STOCK_FOR_PREORDERS` — add stock before converting to IN_STOCK |
+            `PRODUCT_CHANGED` — pre-orders changed while saving; retry.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "422":
+          description: "`VALIDATION_ERROR` | `PREORDER_PRICE_REQUIRED`"
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  /admin/products/{id}/stock:
+    patch:
+      tags: [Admin · Products]
+      summary: Adjust physical stock
+      description: ADMIN. Signed adjustment; stock can never go below units reserved by open orders.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/Id"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AdjustStockInput" }
+      responses:
+        "200": { $ref: "#/components/responses/AdminProduct" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/ProductNotFound" }
+        "409":
+          description: "`STOCK_BELOW_RESERVED` — `details` has the current `stock` and `reserved`."
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /admin/products/{id}/images:
+    post:
+      tags: [Admin · Products]
+      summary: Upload product images
+      description: >
+        ADMIN. JPEG only (checked by declared type and by file signature), at most 10 MB for all
+        files in one request combined, and at most 4 images per product — counting images still
+        processing from earlier uploads. The images are validated, staged, and uploaded to the
+        image host by the worker, so the response is `202` and the images appear on the product
+        once processing finishes (usually within seconds). The first image is the cover.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/Id"
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [images]
+              properties:
+                images:
+                  type: array
+                  minItems: 1
+                  maxItems: 4
+                  items: { type: string, format: binary, contentMediaType: image/jpeg }
+      responses:
+        "202":
+          description: Accepted — the upload is queued for processing.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [upload]
+                    properties:
+                      upload:
+                        type: object
+                        required: [id, imageCount, status]
+                        properties:
+                          id: { $ref: "#/components/schemas/ObjectId" }
+                          imageCount: { type: integer, minimum: 1, maximum: 4 }
+                          status: { type: string, enum: [PROCESSING] }
+        "400":
+          description: "`INVALID_UPLOAD` — no file, not a JPEG, more than 4 files, or over 10 MB combined."
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/ProductNotFound" }
+        "409":
+          description: "`PRODUCT_IMAGE_LIMIT_REACHED` — attached plus processing plus new images would exceed 4. `details: { max, current }`."
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  /admin/products/{id}/images/{imageId}:
+    delete:
+      tags: [Admin · Products]
+      summary: Remove a product image
+      description: ADMIN. Also deletes it from Cloudinary.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/Id"
+        - $ref: "#/components/parameters/ImageId"
+      responses:
+        "200": { $ref: "#/components/responses/AdminProduct" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404":
+          description: "`PRODUCT_NOT_FOUND` | `PRODUCT_IMAGE_NOT_FOUND`"
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  # ───────────────────────────── Admin · Orders ─────────────────────────────
+  /admin/orders:
+    get:
+      tags: [Admin · Orders]
+      summary: List orders
+      description: ADMIN. Filter by status, type, order-number prefix or customer.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Limit20"
+        - name: status
+          in: query
+          schema: { $ref: "#/components/schemas/OrderStatus" }
+        - name: type
+          in: query
+          schema: { $ref: "#/components/schemas/OrderType" }
+        - name: search
+          in: query
+          description: Order-number prefix, e.g. NC-2609
+          schema: { type: string, maxLength: 20 }
+        - name: customerId
+          in: query
+          schema: { $ref: "#/components/schemas/ObjectId" }
+      responses:
+        "200":
+          description: A page of orders.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [orders, pagination]
+                    properties:
+                      orders:
+                        type: array
+                        items: { $ref: "#/components/schemas/AdminOrderSummary" }
+                      pagination: { $ref: "#/components/schemas/Pagination" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /admin/orders/{id}:
+    get:
+      tags: [Admin · Orders]
+      summary: Get an order
+      description: ADMIN. Includes hold bookkeeping (`reservationStatus`, `reservedFrom`), the customer and every transaction.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/Id"
+      responses:
+        "200": { $ref: "#/components/responses/AdminOrder" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/OrderNotFound" }
+
+  /admin/orders/{id}/status:
+    patch:
+      tags: [Admin · Orders]
+      summary: Mark shipped / delivered
+      description: ADMIN. PAID → SHIPPED takes the units out of stock and reservations in one transaction. SHIPPED → DELIVERED.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/Id"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [SHIPPED, DELIVERED] }
+      responses:
+        "200": { $ref: "#/components/responses/AdminOrder" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/OrderNotFound" }
+        "409":
+          description: |
+            `INVALID_STATUS_TRANSITION` — wrong current status (`details.status`) |
+            `PREORDER_NOT_READY_TO_SHIP` — switch the product to In stock first.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /admin/orders/{id}/cancel:
+    post:
+      tags: [Admin · Orders]
+      summary: Cancel an order
+      description: ADMIN. Unpaid, or paid and not shipped (no 24h limit). Returns stock; a paid order is refunded in the background.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/Id"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CancelOrderInput" }
+      responses:
+        "200": { $ref: "#/components/responses/AdminOrder" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/OrderNotFound" }
+        "409": { $ref: "#/components/responses/OrderNotCancellable" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  # ───────────────────────────── Admin · Transactions ─────────────────────────────
+  /admin/transactions:
+    get:
+      tags: [Admin · Transactions]
+      summary: List transactions
+      description: ADMIN. Payments and refunds, newest first.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Limit20"
+        - name: type
+          in: query
+          schema: { $ref: "#/components/schemas/TransactionType" }
+        - name: status
+          in: query
+          schema: { $ref: "#/components/schemas/TransactionStatus" }
+        - name: search
+          in: query
+          description: Provider-reference substring.
+          schema: { type: string, maxLength: 60 }
+      responses:
+        "200":
+          description: A page of transactions.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [transactions, pagination]
+                    properties:
+                      transactions:
+                        type: array
+                        items: { $ref: "#/components/schemas/AdminTransaction" }
+                      pagination: { $ref: "#/components/schemas/Pagination" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /admin/transactions/{id}:
+    get:
+      tags: [Admin · Transactions]
+      summary: Get a transaction
+      description: ADMIN. Includes what the provider reported (`providerPayload`).
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/Id"
+      responses:
+        "200":
+          description: The transaction.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [transaction]
+                    properties:
+                      transaction: { $ref: "#/components/schemas/AdminTransaction" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404":
+          description: "`TRANSACTION_NOT_FOUND`"
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  # ───────────────────────────── Admin · Customers ─────────────────────────────
+  /admin/customers:
+    get:
+      tags: [Admin · Customers]
+      summary: List customers
+      description: ADMIN. Customers only (never admins). Search matches name or email.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Limit20"
+        - name: search
+          in: query
+          schema: { type: string, maxLength: 100 }
+        - name: status
+          in: query
+          schema: { $ref: "#/components/schemas/UserStatus" }
+      responses:
+        "200":
+          description: A page of customers.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [customers, pagination]
+                    properties:
+                      customers:
+                        type: array
+                        items: { $ref: "#/components/schemas/AdminCustomer" }
+                      pagination: { $ref: "#/components/schemas/Pagination" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /admin/customers/{id}:
+    get:
+      tags: [Admin · Customers]
+      summary: Get a customer
+      description: ADMIN. Details, addresses, spend stats and the 20 most recent orders.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/Id"
+      responses:
+        "200":
+          description: The customer page data.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: "#/components/schemas/AdminCustomerDetail" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/CustomerNotFound" }
+
+  /admin/customers/{id}/status:
+    patch:
+      tags: [Admin · Customers]
+      summary: Enable / disable a customer
+      description: ADMIN. Disabling logs the customer out on every device and blocks login and refresh.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/Id"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { $ref: "#/components/schemas/UserStatus" }
+      responses:
+        "200":
+          description: Status updated.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [customer]
+                    properties:
+                      customer: { $ref: "#/components/schemas/AdminCustomer" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/CustomerNotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  # ───────────────────────────── Admin · Overview ─────────────────────────────
+  /admin/dashboard:
+    get:
+      tags: [Admin · Overview]
+      summary: Dashboard
+      description: ADMIN. Revenue (PAID/SHIPPED/DELIVERED), order counts, customers, low stock and recent orders.
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Overview figures.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [dashboard]
+                    properties:
+                      dashboard: { $ref: "#/components/schemas/Dashboard" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /admin/logs/system:
+    get:
+      tags: [Admin · Overview]
+      summary: System events
+      description: ADMIN. What the system did on its own — expiries, payments, refunds, inventory drift.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Limit30"
+        - name: level
+          in: query
+          schema: { $ref: "#/components/schemas/LogLevel" }
+        - name: event
+          in: query
+          schema: { $ref: "#/components/schemas/SystemLogEvent" }
+        - name: entityId
+          in: query
+          schema: { type: string, maxLength: 40 }
+      responses:
+        "200":
+          description: A page of system logs.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [logs, pagination]
+                    properties:
+                      logs:
+                        type: array
+                        items: { $ref: "#/components/schemas/SystemLog" }
+                      pagination: { $ref: "#/components/schemas/Pagination" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /admin/logs/users:
+    get:
+      tags: [Admin · Overview]
+      summary: User actions
+      description: ADMIN. What customers and admins did — logins, orders, catalog and order changes.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Limit30"
+        - name: action
+          in: query
+          schema: { $ref: "#/components/schemas/UserLogAction" }
+        - name: userId
+          in: query
+          schema: { $ref: "#/components/schemas/ObjectId" }
+      responses:
+        "200":
+          description: A page of user logs.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [logs, pagination]
+                    properties:
+                      logs:
+                        type: array
+                        items: { $ref: "#/components/schemas/UserLog" }
+                      pagination: { $ref: "#/components/schemas/Pagination" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  # ───────────────────────────── Site settings ─────────────────────────────
+  /site-settings:
+    get:
+      tags: [Site settings]
+      summary: Get the site settings
+      description: >
+        Public — the storefront loads these before it renders. There is exactly one settings document; it's
+        created with defaults on first use. `null` means "use the default" (a grey hero panel, the theme colour).
+      security: []
+      responses:
+        "200": { $ref: "#/components/responses/SiteSettings" }
+
+  # ───────────────────────────── Admin · Site settings ─────────────────────────────
+  /admin/site-settings:
+    patch:
+      tags: [Admin · Site settings]
+      summary: Update site settings
+      description: ADMIN. Currently the brand colours; send `null` to reset a colour to the theme default.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SiteSettingsInput" }
+      responses:
+        "200": { $ref: "#/components/responses/SiteSettings" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /admin/site-settings/hero/{panel}:
+    parameters:
+      - name: panel
+        in: path
+        required: true
+        schema: { $ref: "#/components/schemas/HeroPanel" }
+    post:
+      tags: [Admin · Site settings]
+      summary: Upload a hero panel image
+      description: >
+        ADMIN. One JPEG (checked by declared type and file signature), at most 10 MB. The image is staged and
+        uploaded to the image host by the worker, so the response is `202`; it replaces the panel's image (the
+        previous one is deleted from the host) once processing finishes, usually within seconds.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [image]
+              properties:
+                image: { type: string, format: binary, contentMediaType: image/jpeg }
+      responses:
+        "202":
+          description: Accepted — the upload is queued for processing.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [upload]
+                    properties:
+                      upload:
+                        type: object
+                        required: [id, panel, status]
+                        properties:
+                          id: { $ref: "#/components/schemas/ObjectId" }
+                          panel: { $ref: "#/components/schemas/HeroPanel" }
+                          status: { type: string, enum: [PROCESSING] }
+        "400":
+          description: "`INVALID_UPLOAD` — no file, not a JPEG, more than one file, or over 10 MB."
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+    delete:
+      tags: [Admin · Site settings]
+      summary: Remove a hero panel image
+      description: ADMIN. The panel shows the grey placeholder again; the image is deleted from the host.
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200": { $ref: "#/components/responses/SiteSettings" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Access token (~15 min) from login, signup or refresh. Keep it in memory only.
+
+  # ───────────── Parameters ─────────────
+  parameters:
+    Page:
+      name: page
+      in: query
+      schema: { type: integer, minimum: 1, default: 1 }
+    Limit20:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 50, default: 20 }
+    Limit30:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 50, default: 30 }
+    Id:
+      name: id
+      in: path
+      required: true
+      schema: { $ref: "#/components/schemas/ObjectId" }
+    ImageId:
+      name: imageId
+      in: path
+      required: true
+      schema: { $ref: "#/components/schemas/ObjectId" }
+    AddressId:
+      name: addressId
+      in: path
+      required: true
+      schema: { $ref: "#/components/schemas/ObjectId" }
+    Slug:
+      name: slug
+      in: path
+      required: true
+      schema: { $ref: "#/components/schemas/Slug" }
+    Sku:
+      name: sku
+      in: path
+      required: true
+      description: Uppercased before matching.
+      schema: { type: string, minLength: 1, maxLength: 32, examples: [NC-TEE-BLK-M] }
+    OrderNumber:
+      name: orderNumber
+      in: path
+      required: true
+      schema: { type: string, pattern: "^NC-\\d{6}-[A-Z0-9]{6}$", examples: [NC-260928-7K3QX9] }
+    PaymentReference:
+      name: reference
+      in: path
+      required: true
+      schema: { type: string, pattern: "^NCPAY-[0-9a-fA-F-]{36}$" }
+
+  # ───────────── Reusable responses ─────────────
+  responses:
+    SiteSettings:
+      description: The site settings.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [data]
+            properties:
+              data:
+                type: object
+                required: [settings]
+                properties:
+                  settings: { $ref: "#/components/schemas/SiteSettings" }
+    ValidationError:
+      description: "`VALIDATION_ERROR` — `details.fields` lists each invalid field: `{ location, path, message }`."
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    Unauthorized:
+      description: "`UNAUTHORIZED` — missing, invalid or expired access token."
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    Forbidden:
+      description: "`FORBIDDEN` — the user's role can't use this route."
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    EmailAlreadyRegistered:
+      description: "`EMAIL_ALREADY_REGISTERED` — an account already uses this email."
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    AddressNotFound:
+      description: "`ADDRESS_NOT_FOUND`"
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    ProductNotFound:
+      description: "`PRODUCT_NOT_FOUND`"
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    OrderNotFound:
+      description: "`ORDER_NOT_FOUND`"
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    OrderNotCancellable:
+      description: "`ORDER_NOT_CANCELLABLE` — `details.status` is the current status."
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    CustomerNotFound:
+      description: "`CUSTOMER_NOT_FOUND` — also returned for admin accounts."
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    PaymentNotFound:
+      description: "`PAYMENT_NOT_FOUND`"
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    Addresses:
+      description: All of the user's addresses (after any change).
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [data]
+            properties:
+              data:
+                type: object
+                required: [addresses]
+                properties:
+                  addresses:
+                    type: array
+                    items: { $ref: "#/components/schemas/Address" }
+    Order:
+      description: The order.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [data]
+            properties:
+              data:
+                type: object
+                required: [order]
+                properties:
+                  order: { $ref: "#/components/schemas/Order" }
+    PlacedOrder:
+      description: Order placed; stock held until `expiresAt`.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [data]
+            properties:
+              data:
+                type: object
+                required: [order, payment]
+                properties:
+                  order: { $ref: "#/components/schemas/Order" }
+                  payment:
+                    description: |
+                      Redirect the customer to `checkoutUrl`. Null if the provider was unreachable —
+                      retry with `POST /orders/{orderNumber}/payment`.
+                    oneOf:
+                      - $ref: "#/components/schemas/PaymentStart"
+                      - type: "null"
+    AdminProduct:
+      description: The product.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [data]
+            properties:
+              data:
+                type: object
+                required: [product]
+                properties:
+                  product: { $ref: "#/components/schemas/AdminProduct" }
+    AdminOrder:
+      description: The order.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [data]
+            properties:
+              data:
+                type: object
+                required: [order]
+                properties:
+                  order: { $ref: "#/components/schemas/AdminOrder" }
+
+  # ───────────── Schemas ─────────────
+  schemas:
+    # --- Building blocks ---
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string, examples: [VALIDATION_ERROR] }
+            message: { type: string }
+            details: { description: Extra data for some codes (see each endpoint). }
+    Pagination:
+      type: object
+      required: [page, limit, total, totalPages]
+      properties:
+        page: { type: integer }
+        limit: { type: integer }
+        total: { type: integer }
+        totalPages: { type: integer }
+    ObjectId:
+      type: string
+      pattern: "^[a-fA-F0-9]{24}$"
+      examples: [665f1c2e8a4b2c0012345678]
+    Money:
+      type: integer
+      minimum: 0
+      description: Integer minor units (kobo). ₦12,500.00 = 1250000.
+      examples: [1250000]
+    Slug:
+      type: string
+      pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+      maxLength: 120
+      examples: [classic-tee-black]
+    Email:
+      type: string
+      format: email
+      description: Trimmed and lowercased by the server.
+      examples: [ada@example.com]
+    NewPassword:
+      type: string
+      minLength: 8
+      maxLength: 72
+    DateTime:
+      type: string
+      format: date-time
+
+    # --- Enums ---
+    Role: { type: string, enum: [CUSTOMER, ADMIN] }
+    UserStatus: { type: string, enum: [ACTIVE, DISABLED] }
+    AvailabilityStatus: { type: string, enum: [IN_STOCK, PRE_ORDER, OUT_OF_STOCK] }
+    PublicityStatus: { type: string, enum: [PUBLIC, HIDDEN] }
+    OrderStatus: { type: string, enum: [PENDING_PAYMENT, PAID, SHIPPED, DELIVERED, CANCELLED, EXPIRED] }
+    OrderType: { type: string, enum: [NORMAL, PREORDER] }
+    ReservationStatus: { type: string, enum: [HELD, RELEASED, FULFILLED] }
+    ReservationPool:
+      type: string
+      enum: [STOCK, PREORDER]
+      description: Which product counter the order's hold is on (`reserved` or `preorderReserved`).
+    CancelledBy: { type: string, enum: [CUSTOMER, ADMIN, SYSTEM] }
+    TransactionType: { type: string, enum: [PAYMENT, REFUND] }
+    TransactionStatus: { type: string, enum: [PENDING, SUCCEEDED, FAILED, EXPIRED] }
+    ItemIssueReason:
+      type: string
+      enum: [NOT_FOUND, NOT_AVAILABLE, OUT_OF_STOCK, PRE_ORDER_ONLY, INSUFFICIENT_QUANTITY, INVALID_QUANTITY, NOT_PRE_ORDER]
+    LogLevel: { type: string, enum: [info, warn, error] }
+    SystemLogEvent:
+      type: string
+      enum:
+        [ORDER_EXPIRED, ORDER_PAID, PAYMENT_FAILED, PAYMENT_NOT_APPLICABLE, REFUND_SUCCEEDED, REFUND_FAILED, INVENTORY_COUNTER_DRIFT]
+    UserLogAction:
+      type: string
+      enum:
+        - SIGNUP
+        - LOGIN
+        - LOGIN_FAILED
+        - LOGOUT
+        - PASSWORD_RESET_REQUESTED
+        - PASSWORD_RESET_COMPLETED
+        - PASSWORD_CHANGED
+        - PROFILE_UPDATED
+        - ORDER_PLACED
+        - ORDER_CANCELLED
+        - ORDER_ADDRESS_CHANGED
+        - PRODUCT_CREATED
+        - PRODUCT_UPDATED
+        - PRODUCT_STOCK_ADJUSTED
+        - PRODUCT_IMAGES_ADDED
+        - PRODUCT_IMAGE_REMOVED
+        - ORDER_SHIPPED
+        - ORDER_DELIVERED
+        - ORDER_CANCELLED_BY_ADMIN
+        - CUSTOMER_DISABLED
+        - CUSTOMER_ENABLED
+        - SITE_SETTINGS_UPDATED
+        - SITE_HERO_IMAGE_UPDATED
+        - SITE_HERO_IMAGE_REMOVED
+    HeroPanel: { type: string, enum: [left, middle, right], description: The landing page's hero panels, left to right. }
+
+    # --- Site settings ---
+    HexColor:
+      type: [string, "null"]
+      pattern: "^#[0-9a-fA-F]{6}$"
+      examples: ["#111111"]
+      description: 6-digit hex, stored lowercase; `null` = the theme default.
+    HeroImage:
+      type: [object, "null"]
+      description: A panel's image, or `null` for the grey placeholder.
+      required: [url]
+      properties:
+        url: { type: string, format: uri }
+    SiteSettings:
+      type: object
+      required: [hero, colors]
+      properties:
+        hero:
+          type: object
+          required: [left, middle, right]
+          properties:
+            left: { $ref: "#/components/schemas/HeroImage" }
+            middle: { $ref: "#/components/schemas/HeroImage" }
+            right: { $ref: "#/components/schemas/HeroImage" }
+        colors:
+          type: object
+          required: [primary, secondary]
+          properties:
+            primary: { $ref: "#/components/schemas/HexColor" }
+            secondary: { $ref: "#/components/schemas/HexColor" }
+        updatedAt: { type: string, format: date-time }
+    SiteSettingsInput:
+      type: object
+      required: [colors]
+      additionalProperties: false
+      properties:
+        colors:
+          type: object
+          minProperties: 1
+          additionalProperties: false
+          properties:
+            primary: { $ref: "#/components/schemas/HexColor" }
+            secondary: { $ref: "#/components/schemas/HexColor" }
+
+    # --- System ---
+    HealthResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: object
+          required: [health]
+          properties:
+            health:
+              type: object
+              required: [status, mongo, redis, uptimeSeconds]
+              properties:
+                status: { type: string, enum: [ok, degraded] }
+                mongo: { type: boolean }
+                redis: { type: boolean }
+                uptimeSeconds: { type: integer }
+
+    # --- Auth & profile ---
+    SignupInput:
+      type: object
+      required: [name, email, password]
+      properties:
+        name: { type: string, minLength: 2, maxLength: 80, examples: [Ada Obi] }
+        email: { $ref: "#/components/schemas/Email" }
+        password: { $ref: "#/components/schemas/NewPassword" }
+    LoginInput:
+      type: object
+      required: [email, password]
+      properties:
+        email: { $ref: "#/components/schemas/Email" }
+        password: { type: string, minLength: 1 }
+    ChangePasswordInput:
+      type: object
+      required: [currentPassword, newPassword]
+      description: "`newPassword` must differ from `currentPassword`."
+      properties:
+        currentPassword: { type: string, minLength: 1 }
+        newPassword: { $ref: "#/components/schemas/NewPassword" }
+    PasswordResetRequestInput:
+      type: object
+      required: [email]
+      properties:
+        email: { $ref: "#/components/schemas/Email" }
+    PasswordResetVerifyInput:
+      type: object
+      required: [email, code]
+      properties:
+        email: { $ref: "#/components/schemas/Email" }
+        code: { type: string, pattern: "^\\d{6}$", examples: ["048213"] }
+    PasswordResetCompleteInput:
+      type: object
+      required: [resetToken, password]
+      properties:
+        resetToken: { type: string, format: uuid }
+        password: { $ref: "#/components/schemas/NewPassword" }
+    AuthUser:
+      type: object
+      required: [id, name, email, role]
+      properties:
+        id: { $ref: "#/components/schemas/ObjectId" }
+        name: { type: string }
+        email: { type: string, format: email }
+        role: { $ref: "#/components/schemas/Role" }
+    SessionResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: object
+          required: [accessToken, user]
+          properties:
+            accessToken: { type: string, description: "JWT, ~15 min. Keep in memory only." }
+            user: { $ref: "#/components/schemas/AuthUser" }
+    Profile:
+      type: object
+      required: [id, name, email, role, createdAt]
+      properties:
+        id: { $ref: "#/components/schemas/ObjectId" }
+        name: { type: string }
+        email: { type: string, format: email }
+        role: { $ref: "#/components/schemas/Role" }
+        createdAt: { $ref: "#/components/schemas/DateTime" }
+    ProfileResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: object
+          required: [profile]
+          properties:
+            profile: { $ref: "#/components/schemas/Profile" }
+    UpdateProfileInput:
+      type: object
+      required: [name]
+      additionalProperties: false
+      properties:
+        name: { type: string, minLength: 2, maxLength: 80 }
+
+    # --- Addresses ---
+    AddressFields:
+      type: object
+      description: Every address field (all strings are trimmed).
+      properties:
+        label:
+          type: string
+          minLength: 1
+          maxLength: 40
+          examples: [Home]
+          description: Identifies a saved address — required, and unique per user (case-insensitive).
+        fullName: { type: string, minLength: 2, maxLength: 80, examples: [Ada Obi] }
+        phone: { type: string, pattern: "^\\+?[0-9\\s-]{7,20}$", examples: [+234 803 123 4567] }
+        line1: { type: string, minLength: 3, maxLength: 120, examples: [12 Admiralty Way] }
+        line2: { type: string, maxLength: 120 }
+        city: { type: string, minLength: 2, maxLength: 60, examples: [Lekki] }
+        state: { type: string, minLength: 2, maxLength: 60, examples: [Lagos] }
+        country: { type: string, minLength: 2, maxLength: 60, examples: [Nigeria] }
+        postalCode: { type: string, maxLength: 20 }
+    AddressInput:
+      allOf:
+        - $ref: "#/components/schemas/AddressFields"
+        - type: object
+          required: [label, fullName, phone, line1, city, state, country]
+          properties:
+            isDefault: { type: boolean }
+    AddressUpdateInput:
+      description: Any subset of address fields (at least one). Unknown keys are rejected.
+      allOf:
+        - $ref: "#/components/schemas/AddressFields"
+        - type: object
+          minProperties: 1
+          properties:
+            isDefault: { type: boolean }
+    ShippingAddress:
+      type: object
+      description: The address snapshot stored on an order.
+      required: [fullName, phone, line1, city, state, country]
+      properties:
+        fullName: { type: string }
+        phone: { type: string }
+        line1: { type: string }
+        line2: { type: string }
+        city: { type: string }
+        state: { type: string }
+        country: { type: string }
+        postalCode: { type: string }
+    Address:
+      type: object
+      required: [id, fullName, phone, line1, city, state, country, isDefault]
+      properties:
+        id: { $ref: "#/components/schemas/ObjectId" }
+        label: { type: string }
+        fullName: { type: string }
+        phone: { type: string }
+        line1: { type: string }
+        line2: { type: string }
+        city: { type: string }
+        state: { type: string }
+        country: { type: string }
+        postalCode: { type: string }
+        isDefault: { type: boolean, description: Exactly one address is the default whenever any exist. }
+
+    # --- Products ---
+    PublicProduct:
+      type: object
+      description: Customer-facing product — one current price, one available quantity, no internal counters.
+      required: [id, name, slug, sku, description, tags, images, price, launchPrice, availabilityStatus, availableQuantity]
+      properties:
+        id: { $ref: "#/components/schemas/ObjectId" }
+        name: { type: string }
+        slug: { type: string }
+        sku: { type: string }
+        description: { type: string }
+        tags: { type: array, items: { type: string } }
+        images:
+          type: array
+          items:
+            type: object
+            required: [id, url]
+            properties:
+              id: { $ref: "#/components/schemas/ObjectId" }
+              url: { type: string, format: uri }
+        price:
+          type: [integer, "null"]
+          description: Current price in kobo — the pre-order price while PRE_ORDER, otherwise the launch price.
+        launchPrice: { $ref: "#/components/schemas/Money" }
+        availabilityStatus: { $ref: "#/components/schemas/AvailabilityStatus" }
+        availableQuantity:
+          type: integer
+          description: Units in stock (IN_STOCK), pre-order spots left (PRE_ORDER), or 0.
+    AdminProduct:
+      type: object
+      description: The full product, including counters.
+      required:
+        [id, name, slug, sku, description, tags, images, pricing, availabilityStatus, publicityStatus,
+         stock, reserved, availableStock, preorderLimit, preorderReserved, availablePreorderSpots, createdAt, updatedAt]
+      properties:
+        id: { $ref: "#/components/schemas/ObjectId" }
+        name: { type: string }
+        slug: { type: string }
+        sku: { type: string }
+        description: { type: string }
+        tags: { type: array, items: { type: string } }
+        images:
+          type: array
+          items:
+            type: object
+            required: [id, url, publicId]
+            properties:
+              id: { $ref: "#/components/schemas/ObjectId" }
+              url: { type: string, format: uri }
+              publicId: { type: string, description: Cloudinary public id. }
+        pricing:
+          type: object
+          required: [launchPrice, preorderPrice]
+          properties:
+            launchPrice: { $ref: "#/components/schemas/Money" }
+            preorderPrice: { type: [integer, "null"], minimum: 0 }
+        availabilityStatus: { $ref: "#/components/schemas/AvailabilityStatus" }
+        publicityStatus: { $ref: "#/components/schemas/PublicityStatus" }
+        stock: { type: integer, description: Physical units on hand. }
+        reserved: { type: integer, description: Units held by open orders. }
+        availableStock: { type: integer, description: stock − reserved (computed). }
+        preorderLimit: { type: integer }
+        preorderReserved: { type: integer, description: Pre-order spots claimed. }
+        availablePreorderSpots: { type: integer, description: preorderLimit − preorderReserved (computed). }
+        createdAt: { $ref: "#/components/schemas/DateTime" }
+        updatedAt: { $ref: "#/components/schemas/DateTime" }
+    CreateProductInput:
+      type: object
+      required: [name, sku, pricing]
+      properties:
+        name: { type: string, minLength: 2, maxLength: 120 }
+        sku:
+          type: string
+          pattern: "^[A-Za-z0-9-]{3,32}$"
+          description: Uppercased by the server. Permanent — carts and orders reference products by SKU.
+          examples: [NC-TEE-BLK-M]
+        slug:
+          allOf: [{ $ref: "#/components/schemas/Slug" }]
+          description: Defaults to a slug of the name.
+        description: { type: string, maxLength: 5000, default: "" }
+        tags:
+          type: array
+          maxItems: 20
+          default: []
+          description: Lowercased and de-duplicated by the server.
+          items: { type: string, minLength: 1, maxLength: 30 }
+        pricing:
+          type: object
+          required: [launchPrice]
+          properties:
+            launchPrice: { type: integer, exclusiveMinimum: 0, description: Kobo. }
+            preorderPrice:
+              type: [integer, "null"]
+              exclusiveMinimum: 0
+              description: Kobo. Required if availabilityStatus is PRE_ORDER.
+        availabilityStatus:
+          allOf: [{ $ref: "#/components/schemas/AvailabilityStatus" }]
+          default: OUT_OF_STOCK
+        publicityStatus:
+          allOf: [{ $ref: "#/components/schemas/PublicityStatus" }]
+          default: HIDDEN
+        stock: { type: integer, minimum: 0, default: 0, description: Initial physical stock. }
+        preorderLimit: { type: integer, minimum: 0, default: 0 }
+    UpdateProductInput:
+      type: object
+      description: Any subset (at least one field). Unknown keys — including `sku` and `stock` — are rejected.
+      minProperties: 1
+      additionalProperties: false
+      properties:
+        name: { type: string, minLength: 2, maxLength: 120 }
+        slug: { $ref: "#/components/schemas/Slug" }
+        description: { type: string, maxLength: 5000 }
+        tags:
+          type: array
+          maxItems: 20
+          items: { type: string, minLength: 1, maxLength: 30 }
+        pricing:
+          type: object
+          additionalProperties: false
+          properties:
+            launchPrice: { type: integer, exclusiveMinimum: 0 }
+            preorderPrice: { type: [integer, "null"], exclusiveMinimum: 0 }
+        availabilityStatus: { $ref: "#/components/schemas/AvailabilityStatus" }
+        publicityStatus: { $ref: "#/components/schemas/PublicityStatus" }
+        preorderLimit: { type: integer, minimum: 0 }
+    AdjustStockInput:
+      type: object
+      required: [adjustment]
+      properties:
+        adjustment:
+          type: integer
+          minimum: -100000
+          maximum: 100000
+          not: { const: 0 }
+          description: Signed change to physical stock, e.g. 20 received or -2 damaged. Can't be 0.
+          examples: [20]
+        reason: { type: string, maxLength: 200, examples: [Restock from supplier] }
+
+    # --- Cart ---
+    CartItem:
+      type: object
+      required: [sku, quantity]
+      properties:
+        sku: { type: string, minLength: 1, maxLength: 32, examples: [NC-TEE-BLK-M] }
+        quantity:
+          type: integer
+          description: Out-of-range quantities are reported as an INVALID_QUANTITY issue, not rejected.
+          examples: [2]
+    ItemIssue:
+      type: object
+      required: [sku, reason]
+      properties:
+        sku: { type: string }
+        reason: { $ref: "#/components/schemas/ItemIssueReason" }
+        availableQuantity: { type: integer }
+        maxQuantity: { type: integer }
+    CartLine:
+      type: object
+      description: One cart line with live product data. Product fields are null when the SKU doesn't exist.
+      required: [sku, quantity, productId, name, slug, image, unitPrice, lineTotal, availabilityStatus, availableQuantity, issue]
+      properties:
+        sku: { type: string }
+        quantity: { type: integer }
+        productId: { type: [string, "null"] }
+        name: { type: [string, "null"] }
+        slug: { type: [string, "null"], description: Null when the product is hidden or missing. }
+        image: { type: [string, "null"], format: uri }
+        unitPrice: { type: [integer, "null"] }
+        lineTotal: { type: [integer, "null"] }
+        availabilityStatus:
+          oneOf:
+            - $ref: "#/components/schemas/AvailabilityStatus"
+            - type: "null"
+        availableQuantity: { type: integer }
+        issue:
+          oneOf:
+            - $ref: "#/components/schemas/ItemIssueReason"
+            - type: "null"
+    CartPreview:
+      type: object
+      description: Every line, every issue, and totals over the issue-free lines. Shipping is charged only when something is being bought.
+      required: [items, issues, subtotal, shippingFee, total]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/CartLine" } }
+        issues: { type: array, items: { $ref: "#/components/schemas/ItemIssue" } }
+        subtotal: { $ref: "#/components/schemas/Money" }
+        shippingFee: { $ref: "#/components/schemas/Money" }
+        total: { $ref: "#/components/schemas/Money" }
+
+    # --- Orders ---
+    ShippingTarget:
+      type: object
+      description: >
+        Send exactly one of `shippingAddressId` (a saved address) or `shippingAddress` (a one-off address for
+        this order only — it is never saved to the address book, so it has no label).
+      properties:
+        shippingAddressId: { $ref: "#/components/schemas/ObjectId" }
+        shippingAddress: { $ref: "#/components/schemas/ShippingAddress" }
+    PlaceOrderInput:
+      allOf:
+        - $ref: "#/components/schemas/ShippingTarget"
+        - type: object
+          required: [items]
+          properties:
+            items:
+              type: array
+              minItems: 1
+              maxItems: 50
+              description: Unique SKUs.
+              items: { $ref: "#/components/schemas/CartItem" }
+    PlacePreorderInput:
+      allOf:
+        - $ref: "#/components/schemas/ShippingTarget"
+        - type: object
+          required: [sku, quantity]
+          properties:
+            sku: { type: string, minLength: 1, maxLength: 32 }
+            quantity: { type: integer, minimum: 1, maximum: 20 }
+    CancelOrderInput:
+      type: object
+      properties:
+        reason: { type: string, maxLength: 300, examples: [Ordered the wrong size] }
+    OrderItem:
+      type: object
+      description: A snapshot of the product at the time of ordering.
+      required: [productId, sku, name, image, unitPrice, quantity, lineTotal]
+      properties:
+        productId: { $ref: "#/components/schemas/ObjectId" }
+        sku: { type: string }
+        name: { type: string }
+        image: { type: [string, "null"], format: uri }
+        unitPrice: { $ref: "#/components/schemas/Money" }
+        quantity: { type: integer, minimum: 1 }
+        lineTotal: { $ref: "#/components/schemas/Money" }
+    Cancellation:
+      type: object
+      required: [by]
+      properties:
+        by: { $ref: "#/components/schemas/CancelledBy" }
+        reason: { type: string }
+    Order:
+      type: object
+      description: A customer's order.
+      required:
+        [id, canPay, canCancel, canChangeAddress, orderNumber, type, status, items, subtotal, shippingFee, total, currency, shippingAddress, expiresAt, createdAt]
+      properties:
+        id: { $ref: "#/components/schemas/ObjectId" }
+        canPay: { type: boolean, description: Awaiting payment — offer Pay. }
+        canCancel: { type: boolean, description: "Unpaid, or paid < 24h ago and not shipped — offer Cancel." }
+        canChangeAddress: { type: boolean, description: "PENDING_PAYMENT or PAID (not shipped yet) — offer Change address." }
+        orderNumber: { type: string, examples: [NC-260928-7K3QX9] }
+        type: { $ref: "#/components/schemas/OrderType" }
+        status: { $ref: "#/components/schemas/OrderStatus" }
+        items: { type: array, items: { $ref: "#/components/schemas/OrderItem" } }
+        subtotal: { $ref: "#/components/schemas/Money" }
+        shippingFee: { $ref: "#/components/schemas/Money" }
+        total: { $ref: "#/components/schemas/Money" }
+        currency: { type: string, examples: [NGN] }
+        shippingAddress: { $ref: "#/components/schemas/ShippingAddress" }
+        expiresAt: { allOf: [{ $ref: "#/components/schemas/DateTime" }], description: When an unpaid order releases its stock. }
+        paidAt: { $ref: "#/components/schemas/DateTime" }
+        shippedAt: { $ref: "#/components/schemas/DateTime" }
+        deliveredAt: { $ref: "#/components/schemas/DateTime" }
+        cancelledAt: { $ref: "#/components/schemas/DateTime" }
+        cancellation: { $ref: "#/components/schemas/Cancellation" }
+        createdAt: { $ref: "#/components/schemas/DateTime" }
+    OrderSummary:
+      type: object
+      description: A compact order for lists.
+      required: [orderNumber, type, status, total, currency, itemCount, previewItem, expiresAt, createdAt]
+      properties:
+        orderNumber: { type: string }
+        type: { $ref: "#/components/schemas/OrderType" }
+        status: { $ref: "#/components/schemas/OrderStatus" }
+        total: { $ref: "#/components/schemas/Money" }
+        currency: { type: string }
+        itemCount: { type: integer }
+        previewItem:
+          type: object
+          required: [name, image]
+          properties:
+            name: { type: string }
+            image: { type: [string, "null"], format: uri }
+        expiresAt: { $ref: "#/components/schemas/DateTime" }
+        createdAt: { $ref: "#/components/schemas/DateTime" }
+    PaymentStart:
+      type: object
+      description: A started payment attempt — send the customer to `checkoutUrl`.
+      required: [reference, checkoutUrl]
+      properties:
+        reference: { type: string, examples: [NCPAY-3f1c2e8a-…] }
+        checkoutUrl: { type: string, format: uri }
+
+    # --- Payments ---
+    PaymentWebhookEvent:
+      type: object
+      required: [event, data]
+      properties:
+        event: { type: string, examples: [payment.succeeded] }
+        data:
+          type: object
+          required: [reference]
+          properties:
+            reference: { type: string }
+            amount: { type: integer }
+            currency: { type: string }
+    MockPayment:
+      type: object
+      required: [reference, amount, currency, status, returnUrl]
+      properties:
+        reference: { type: string }
+        amount: { $ref: "#/components/schemas/Money" }
+        currency: { type: string }
+        status: { $ref: "#/components/schemas/TransactionStatus" }
+        returnUrl: { type: string, format: uri }
+    Transaction:
+      type: object
+      description: One money movement (payment attempt or refund), as stored.
+      required: [id, orderId, userId, type, provider, providerReference, amount, currency, status, createdAt, updatedAt]
+      properties:
+        id: { $ref: "#/components/schemas/ObjectId" }
+        orderId: { $ref: "#/components/schemas/ObjectId" }
+        userId: { $ref: "#/components/schemas/ObjectId" }
+        type: { $ref: "#/components/schemas/TransactionType" }
+        provider: { type: string, examples: [mock] }
+        providerReference: { type: string, description: "NCPAY-… for payments, NCREF-… for refunds." }
+        amount: { $ref: "#/components/schemas/Money" }
+        currency: { type: string }
+        status: { $ref: "#/components/schemas/TransactionStatus" }
+        refundOf: { allOf: [{ $ref: "#/components/schemas/ObjectId" }], description: "REFUND only: the PAYMENT it reverses." }
+        providerPayload: { description: What the provider reported when verified. }
+        createdAt: { $ref: "#/components/schemas/DateTime" }
+        updatedAt: { $ref: "#/components/schemas/DateTime" }
+
+    # --- Admin ---
+    CustomerRef:
+      type: object
+      description: Who an order or transaction belongs to. Only `id` if the user no longer exists.
+      required: [id]
+      properties:
+        id: { $ref: "#/components/schemas/ObjectId" }
+        name: { type: string }
+        email: { type: string, format: email }
+    AdminOrderSummary:
+      allOf:
+        - $ref: "#/components/schemas/OrderSummary"
+        - type: object
+          required: [id, customer]
+          properties:
+            id: { $ref: "#/components/schemas/ObjectId" }
+            customer: { $ref: "#/components/schemas/CustomerRef" }
+    AdminOrder:
+      type: object
+      description: The full order as the admin sees it, including hold bookkeeping and every transaction.
+      required:
+        [id, orderNumber, type, status, reservationStatus, reservedFrom, items, subtotal, shippingFee, total,
+         currency, shippingAddress, expiresAt, customer, transactions, createdAt, updatedAt]
+      properties:
+        id: { $ref: "#/components/schemas/ObjectId" }
+        orderNumber: { type: string }
+        type: { $ref: "#/components/schemas/OrderType" }
+        status: { $ref: "#/components/schemas/OrderStatus" }
+        reservationStatus: { $ref: "#/components/schemas/ReservationStatus" }
+        reservedFrom: { $ref: "#/components/schemas/ReservationPool" }
+        items: { type: array, items: { $ref: "#/components/schemas/OrderItem" } }
+        subtotal: { $ref: "#/components/schemas/Money" }
+        shippingFee: { $ref: "#/components/schemas/Money" }
+        total: { $ref: "#/components/schemas/Money" }
+        currency: { type: string }
+        shippingAddress: { $ref: "#/components/schemas/ShippingAddress" }
+        expiresAt: { $ref: "#/components/schemas/DateTime" }
+        paidAt: { $ref: "#/components/schemas/DateTime" }
+        shippedAt: { $ref: "#/components/schemas/DateTime" }
+        deliveredAt: { $ref: "#/components/schemas/DateTime" }
+        cancelledAt: { $ref: "#/components/schemas/DateTime" }
+        cancellation: { $ref: "#/components/schemas/Cancellation" }
+        customer: { $ref: "#/components/schemas/CustomerRef" }
+        transactions: { type: array, items: { $ref: "#/components/schemas/Transaction" } }
+        createdAt: { $ref: "#/components/schemas/DateTime" }
+        updatedAt: { $ref: "#/components/schemas/DateTime" }
+    AdminTransaction:
+      type: object
+      description: A transaction as the admin sees it, with its order and customer.
+      required: [id, type, status, provider, providerReference, amount, currency, order, customer, createdAt, updatedAt]
+      properties:
+        id: { $ref: "#/components/schemas/ObjectId" }
+        type: { $ref: "#/components/schemas/TransactionType" }
+        status: { $ref: "#/components/schemas/TransactionStatus" }
+        provider: { type: string }
+        providerReference: { type: string }
+        amount: { $ref: "#/components/schemas/Money" }
+        currency: { type: string }
+        providerPayload: { description: What the provider reported when verified. }
+        order:
+          type: object
+          required: [id]
+          properties:
+            id: { $ref: "#/components/schemas/ObjectId" }
+            orderNumber: { type: string }
+            status: { $ref: "#/components/schemas/OrderStatus" }
+            total: { $ref: "#/components/schemas/Money" }
+        customer: { $ref: "#/components/schemas/CustomerRef" }
+        refundOf:
+          type: object
+          description: REFUND only — the payment it reverses.
+          required: [id, providerReference]
+          properties:
+            id: { $ref: "#/components/schemas/ObjectId" }
+            providerReference: { type: string }
+        createdAt: { $ref: "#/components/schemas/DateTime" }
+        updatedAt: { $ref: "#/components/schemas/DateTime" }
+    AdminCustomer:
+      type: object
+      required: [id, name, email, status, createdAt]
+      properties:
+        id: { $ref: "#/components/schemas/ObjectId" }
+        name: { type: string }
+        email: { type: string, format: email }
+        status: { $ref: "#/components/schemas/UserStatus" }
+        createdAt: { $ref: "#/components/schemas/DateTime" }
+    AdminCustomerDetail:
+      type: object
+      required: [customer, stats, recentOrders]
+      properties:
+        customer:
+          allOf:
+            - $ref: "#/components/schemas/AdminCustomer"
+            - type: object
+              required: [addresses]
+              properties:
+                addresses: { type: array, items: { $ref: "#/components/schemas/Address" } }
+        stats:
+          type: object
+          required: [orderCount, paidOrderCount, totalSpent]
+          properties:
+            orderCount: { type: integer }
+            paidOrderCount: { type: integer, description: "PAID, SHIPPED or DELIVERED." }
+            totalSpent: { $ref: "#/components/schemas/Money" }
+        recentOrders: { type: array, items: { $ref: "#/components/schemas/AdminOrderSummary" } }
+    Dashboard:
+      type: object
+      required: [revenue, orders, customers, lowStockProducts, lowStockThreshold, recentOrders]
+      properties:
+        revenue:
+          type: object
+          required: [allTime, recent, recentDays]
+          properties:
+            allTime: { $ref: "#/components/schemas/Money" }
+            recent: { $ref: "#/components/schemas/Money" }
+            recentDays: { type: integer, examples: [30] }
+        orders:
+          type: object
+          required: [today, awaitingShipment, byStatus]
+          properties:
+            today: { type: integer }
+            awaitingShipment: { type: integer, description: Orders in PAID. }
+            byStatus:
+              type: object
+              description: Count per OrderStatus (every status present, 0 if none).
+              additionalProperties: { type: integer }
+        customers:
+          type: object
+          required: [total]
+          properties:
+            total: { type: integer }
+        lowStockProducts:
+          type: array
+          items:
+            type: object
+            required: [id, name, slug, sku, stock, reserved, availableStock]
+            properties:
+              id: { $ref: "#/components/schemas/ObjectId" }
+              name: { type: string }
+              slug: { $ref: "#/components/schemas/Slug" }
+              sku: { type: string }
+              stock: { type: integer }
+              reserved: { type: integer }
+              availableStock: { type: integer }
+        lowStockThreshold: { type: integer, examples: [5] }
+        recentOrders: { type: array, items: { $ref: "#/components/schemas/AdminOrderSummary" } }
+    SystemLog:
+      type: object
+      required: [id, level, event, entityType, entityId, message, createdAt]
+      properties:
+        id: { $ref: "#/components/schemas/ObjectId" }
+        level: { $ref: "#/components/schemas/LogLevel" }
+        event: { $ref: "#/components/schemas/SystemLogEvent" }
+        entityType: { type: string, examples: [Order] }
+        entityId: { type: string }
+        message: { type: string }
+        meta: { description: Extra details. }
+        createdAt: { $ref: "#/components/schemas/DateTime" }
+    UserLog:
+      type: object
+      required: [id, action, user, createdAt]
+      properties:
+        id: { $ref: "#/components/schemas/ObjectId" }
+        action: { $ref: "#/components/schemas/UserLogAction" }
+        ip: { type: string }
+        userAgent: { type: string }
+        meta: { description: "Extra details (never passwords, tokens or codes)." }
+        user:
+          allOf:
+            - $ref: "#/components/schemas/CustomerRef"
+            - type: object
+              properties:
+                role: { $ref: "#/components/schemas/Role" }
+        createdAt: { $ref: "#/components/schemas/DateTime" }
