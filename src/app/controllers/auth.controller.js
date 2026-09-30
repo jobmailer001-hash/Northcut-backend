@@ -16,8 +16,8 @@ import { getRequestContext } from "#utils/request.util.js";
  * Refresh-cookie attributes. Scoped to the auth routes so it's sent nowhere else.
  *
  * `sameSite: "strict"` only works because the browser sees the API on the frontend's own domain:
- * in production the frontend (Vercel) proxies /api/* to this API (Render) — see the frontend's
- * vercel.json and README → Deployment. If the frontend ever calls the Render URL directly, this
+ * the frontend proxies /api/* to this API — Vite's dev-server proxy locally, vercel.json on Vercel
+ * (see the frontend's CLAUDE.md → "API base URL & proxy"). If the frontend ever calls this API's domain directly, this
  * cookie becomes cross-site, is never sent back, and users are logged out on every reload. Keep the
  * proxy rather than loosening this to "none" (which browsers increasingly block for third parties).
  * @type {import("express").CookieOptions}

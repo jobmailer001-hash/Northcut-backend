@@ -16,10 +16,11 @@ export const HeroPanels = {
 };
 
 /**
- * Cloudinary sub-folder for hero images.
+ * Cloudinary sub-folder for hero panel images, under CLOUDINARY_FOLDER — i.e.
+ * "northcut/heroImages". Must match the folder set up in the Cloudinary account.
  * @type {string}
  */
-export const HERO_IMAGE_FOLDER = "site/hero";
+export const HERO_IMAGE_FOLDER = "heroImages";
 
 /**
  * Colours are stored as 6-digit hex, e.g. "#111111".

@@ -33,10 +33,11 @@ import { buildPagination, toSkip } from "#utils/pagination.util.js";
 import { escapeRegex, slugify } from "#utils/string.util.js";
 
 /**
- * Cloudinary sub-folder for product images.
+ * Cloudinary sub-folder for product images, under CLOUDINARY_FOLDER — i.e. "northcut/productsImages".
+ * Must match the folder set up in the Cloudinary account.
  * @type {string}
  */
-const PRODUCT_IMAGE_FOLDER = "products";
+const PRODUCT_IMAGE_FOLDER = "productsImages";
 
 /**
  * @typedef {{ ip?: string, userAgent?: string }} RequestContext

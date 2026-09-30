@@ -40,10 +40,11 @@ const createExpressApp = () => {
   app.use("/api/docs", swaggerUi.serve, swaggerUi.setup(null, { swaggerOptions: { url: OPENAPI_SPEC_URL } }));
 
   app.use(helmet());
-  // Needed locally, where the frontend (localhost:5173) calls the API (localhost:4000) cross-origin.
-  // In production the frontend proxies /api/* to this API (vercel.json), so browser requests are
-  // same-origin and CORS never applies — CLIENT_URL must still be the frontend's URL (it's also
-  // used for links in emails and the payment return page).
+  // A fallback only: the frontend reaches this API through a same-origin proxy — Vite's dev-server
+  // proxy locally, vercel.json in production — so browser requests never need CORS. It only applies
+  // if a page at CLIENT_URL calls this API's own domain directly (which the frontend's rules forbid,
+  // as the SameSite=strict refresh cookie wouldn't be sent). CLIENT_URL must still be the frontend's
+  // URL: it's also used for links in emails and the payment return page.
   app.use(cors({ origin: env.clientUrl, credentials: true }));
   app.use(cookieParser());
   // Keep the exact bytes too: webhook signatures are computed over the raw body, not re-serialised JSON.
