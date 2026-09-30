@@ -501,10 +501,20 @@ export const uploadStagedProductImages = async ({ uploadId, adminId, context }) 
 
   if (!pendingUpload) {
     // Already attached by an earlier attempt, or expired by the TTL index.
+    logger.info("Product image upload skipped — already processed or expired", { uploadId });
     return;
   }
 
   const productId = String(pendingUpload.productId);
+  const imageCount = pendingUpload.images.length;
+  const startedAt = Date.now();
+  logger.info("Uploading product images to Cloudinary", {
+    uploadId,
+    productId,
+    imageCount,
+    folder: PRODUCT_IMAGE_FOLDER,
+  });
+
   const results = await Promise.allSettled(
     pendingUpload.images.map((image) => uploadImage({ buffer: image.data, folder: PRODUCT_IMAGE_FOLDER })),
   );
@@ -512,9 +522,23 @@ export const uploadStagedProductImages = async ({ uploadId, adminId, context }) 
   const failedUpload = results.find((result) => result.status === "rejected");
 
   if (failedUpload) {
+    logger.warn("Product image upload to Cloudinary failed — cleaning up; the job will retry", {
+      uploadId,
+      productId,
+      uploadedBeforeFailure: uploadedImages.length,
+      imageCount,
+      message: failedUpload.reason?.message,
+    });
     await deleteUploadedImages(uploadedImages);
     throw failedUpload.reason;
   }
+
+  logger.info("Product images uploaded to Cloudinary", {
+    uploadId,
+    productId,
+    publicIds: uploadedImages.map((image) => image.publicId),
+    durationMs: Date.now() - startedAt,
+  });
 
   let updatedProduct;
   try {
@@ -544,6 +568,13 @@ export const uploadStagedProductImages = async ({ uploadId, adminId, context }) 
     });
     return;
   }
+
+  logger.info("Product images attached", {
+    uploadId,
+    productId,
+    imageCount: uploadedImages.length,
+    totalImages: updatedProduct.images.length,
+  });
 
   await writeUserLog({
     userId: adminId,

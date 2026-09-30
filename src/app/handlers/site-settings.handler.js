@@ -51,13 +51,15 @@ const toSiteSettingsView = (settings) => ({
  * Deletes an image from the host. Best-effort: the database is the source of truth, so a failure
  * is logged as an orphan instead of failing the operation.
  * @param {string} publicId - The image's host id.
- * @returns {Promise<void>}
+ * @returns {Promise<boolean>} Whether the image was deleted.
  */
 const deleteHostedImage = async (publicId) => {
   try {
     await deleteImage(publicId);
+    return true;
   } catch (error) {
     logger.error("Orphaned hero image left in Cloudinary", { publicId, message: error.message });
+    return false;
   }
 };
 
@@ -136,12 +138,33 @@ export const uploadStagedHeroImage = async ({ uploadId, adminId, context }) => {
 
   if (!pendingUpload) {
     // Already applied by an earlier attempt, or expired by the TTL index.
+    logger.info("Hero image upload skipped — already processed or expired", { uploadId });
     return;
   }
 
   const panel = pendingUpload.heroPanel;
-  // A failed upload throws, so BullMQ retries; nothing has changed yet.
-  const uploadedImage = await uploadImage({ buffer: pendingUpload.images[0].data, folder: HERO_IMAGE_FOLDER });
+  const startedAt = Date.now();
+  logger.info("Uploading hero image to Cloudinary", { uploadId, panel, folder: HERO_IMAGE_FOLDER });
+
+  let uploadedImage;
+  try {
+    uploadedImage = await uploadImage({ buffer: pendingUpload.images[0].data, folder: HERO_IMAGE_FOLDER });
+  } catch (error) {
+    // Nothing has changed yet; rethrowing lets BullMQ retry.
+    logger.warn("Hero image upload to Cloudinary failed — the job will retry", {
+      uploadId,
+      panel,
+      message: error.message,
+    });
+    throw error;
+  }
+
+  logger.info("Hero image uploaded to Cloudinary", {
+    uploadId,
+    panel,
+    publicId: uploadedImage.publicId,
+    durationMs: Date.now() - startedAt,
+  });
 
   let settingsBefore;
   try {
@@ -156,9 +179,11 @@ export const uploadStagedHeroImage = async ({ uploadId, adminId, context }) => {
   }
 
   const previousImage = settingsBefore?.hero?.[panel];
+  logger.info("Hero image applied", { uploadId, panel, replacedPrevious: Boolean(previousImage) });
 
-  if (previousImage) {
-    await deleteHostedImage(previousImage.publicId);
+  // A failed delete is already logged as an orphan by deleteHostedImage.
+  if (previousImage && (await deleteHostedImage(previousImage.publicId))) {
+    logger.info("Previous hero image removed from Cloudinary", { panel, publicId: previousImage.publicId });
   }
 
   await writeUserLog({
