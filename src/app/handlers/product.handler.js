@@ -10,6 +10,7 @@ import { AppError } from "#errors/app-error.js";
 import { ErrorCodes } from "#errors/error-codes.js";
 import { deleteImage, uploadImage } from "#providers/image.provider.js";
 import { getQueue, QueueNames } from "#queues/queues.js";
+import { hideLooksWithSku } from "#repositories/look.repository.js";
 import { movePreorderHoldsToStock } from "#repositories/order.repository.js";
 import {
   countImagesForProduct as countPendingImagesForProduct,
@@ -256,12 +257,14 @@ export const createProduct = async ({ fields, adminId, context }) => {
  * - PRE_ORDER → IN_STOCK with claimed spots converts them into reserved stock (plan.md §5):
  *   stock must cover them, and the held pre-orders are re-pointed to stock, in one transaction;
  * - PRE_ORDER → OUT_OF_STOCK is refused while spots are claimed.
+ * Hiding a product also hides every public look containing it, in the same transaction.
  * @param {Object} options
  * @param {string} options.productId - The product's id.
  * @param {Object} options.changes - Validated update body.
  * @param {string} options.adminId - Acting admin.
  * @param {RequestContext} options.context - Request context for the user log.
- * @returns {Promise<import("mongoose").Document>} The updated product.
+ * @returns {Promise<{ product: import("mongoose").Document, hiddenLooks: { id: string, name: string }[] }>}
+ *   The updated product, and the looks hidden along with it.
  * @throws {AppError} PRODUCT_NOT_FOUND | PREORDER_PRICE_REQUIRED | PREORDERS_PENDING |
  *   INSUFFICIENT_STOCK_FOR_PREORDERS | PRODUCT_CHANGED | PREORDER_LIMIT_BELOW_RESERVED | SLUG_ALREADY_EXISTS
  */
@@ -283,7 +286,7 @@ export const updateProduct = async ({ productId, changes, adminId, context }) =>
 
   // e.g. `{ pricing: {} }` — valid, but nothing to change.
   if (!Object.keys(set).length) {
-    return existing;
+    return { product: existing, hiddenLooks: [] };
   }
 
   const claimedSpots = existing.preorderReserved;
@@ -313,19 +316,25 @@ export const updateProduct = async ({ productId, changes, adminId, context }) =>
     }),
   };
   const inc = isConvertingPreorders ? { reserved: claimedSpots, preorderReserved: -claimedSpots } : undefined;
+  const isHiding = changes.publicityStatus === PublicityStatuses.HIDDEN;
 
   let product;
+  let hiddenLooks = [];
   try {
-    product = isConvertingPreorders
-      ? await runInTransaction(async (session) => {
-          const convertedProduct = await updateById({ productId, set, inc, conditions, session });
+    product =
+      isConvertingPreorders || isHiding
+        ? await runInTransaction(async (session) => {
+            const updatedProduct = await updateById({ productId, set, inc, conditions, session });
 
-          if (convertedProduct) {
-            await movePreorderHoldsToStock({ productId, session });
-          }
-          return convertedProduct;
-        })
-      : await updateById({ productId, set, conditions });
+            if (updatedProduct && isConvertingPreorders) {
+              await movePreorderHoldsToStock({ productId, session });
+            }
+            if (updatedProduct && isHiding) {
+              hiddenLooks = await hideLooksWithSku({ sku: updatedProduct.sku, session });
+            }
+            return updatedProduct;
+          })
+        : await updateById({ productId, set, conditions });
   } catch (error) {
     rethrowDuplicate(error);
   }
@@ -338,9 +347,14 @@ export const updateProduct = async ({ productId, changes, adminId, context }) =>
     userId: adminId,
     action: UserLogActions.PRODUCT_UPDATED,
     context,
-    meta: { productId, fields: Object.keys(set), ...(isConvertingPreorders && { convertedPreorders: claimedSpots }) },
+    meta: {
+      productId,
+      fields: Object.keys(set),
+      ...(isConvertingPreorders && { convertedPreorders: claimedSpots }),
+      ...(hiddenLooks.length && { hiddenLookIds: hiddenLooks.map((look) => look.id) }),
+    },
   });
-  return product;
+  return { product, hiddenLooks };
 };
 
 /**

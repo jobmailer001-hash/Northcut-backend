@@ -5,6 +5,7 @@ import createBullMqConnection from "#db/redis/bullmq.connection.js";
 import { QueueNames } from "#queues/queues.js";
 
 import { processEmailJob } from "./processors/emails.processor.js";
+import { processLookImageJob } from "./processors/look-images.processor.js";
 import { processOrderExpiryJob } from "./processors/order-expiry.processor.js";
 import { processPaymentEventJob } from "./processors/payment-events.processor.js";
 import { processProductImagesJob } from "./processors/product-images.processor.js";
@@ -22,6 +23,7 @@ const processors = {
   [QueueNames.REFUNDS]: processRefundJob,
   [QueueNames.PRODUCT_IMAGES]: processProductImagesJob,
   [QueueNames.SITE_HERO_IMAGES]: processSiteHeroImageJob,
+  [QueueNames.LOOK_IMAGES]: processLookImageJob,
 };
 
 /**

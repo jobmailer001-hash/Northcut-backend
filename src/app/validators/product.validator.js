@@ -23,22 +23,22 @@ const moneyField = z
   .int("Amounts are in kobo and must be whole numbers.")
   .nonnegative();
 
-const nameField = z.string().trim().min(2, "Name must be at least 2 characters.").max(120);
+export const nameField = z.string().trim().min(2, "Name must be at least 2 characters.").max(120);
 
-const skuField = z
+export const skuField = z
   .string()
   .trim()
   .toUpperCase()
   .regex(/^[A-Z0-9-]{3,32}$/, "SKU must be 3–32 letters, numbers or dashes.");
 
-const slugField = z
+export const slugField = z
   .string()
   .trim()
   .toLowerCase()
   .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/, "Slug may only contain lowercase letters, numbers and single dashes.")
   .max(120);
 
-const descriptionField = z.string().trim().max(5000);
+export const descriptionField = z.string().trim().max(5000);
 
 const tagsField = z
   .array(z.string().trim().toLowerCase().min(1).max(30))

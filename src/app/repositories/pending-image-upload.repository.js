@@ -25,6 +25,17 @@ export const createForHeroPanel = async ({ heroPanel, buffer }) => {
 };
 
 /**
+ * Stages one look's image bytes for the worker.
+ * @param {Object} options
+ * @param {string} options.lookId - The look the image belongs to.
+ * @param {Buffer} options.buffer - The image's bytes.
+ * @returns {Promise<import("mongoose").Document>} The staged upload.
+ */
+export const createForLook = async ({ lookId, buffer }) => {
+  return PendingImageUpload.create({ lookId, images: [{ data: buffer }] });
+};
+
+/**
  * Finds a staged upload (hydrated, so each `images[].data` is a Buffer).
  * @param {string} uploadId - The staged upload's id.
  * @returns {Promise<import("mongoose").Document | null>} The staged upload, or null if gone.

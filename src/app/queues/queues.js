@@ -13,6 +13,7 @@ export const QueueNames = {
   EMAILS: "emails",
   PRODUCT_IMAGES: "product-images",
   SITE_HERO_IMAGES: "site-hero-images",
+  LOOK_IMAGES: "look-images",
 };
 
 /**

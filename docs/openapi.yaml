@@ -28,11 +28,13 @@ tags:
   - name: Auth
   - name: Me
   - name: Products
+  - name: Looks
   - name: Cart
   - name: Orders
   - name: Webhooks
   - name: Mock gateway (dev only)
   - name: Admin · Products
+  - name: Admin · Looks
   - name: Admin · Orders
   - name: Admin · Transactions
   - name: Admin · Customers
@@ -413,6 +415,64 @@ paths:
                     properties:
                       product: { $ref: "#/components/schemas/PublicProduct" }
         "404": { $ref: "#/components/responses/ProductNotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /looks:
+    get:
+      tags: [Looks]
+      summary: List looks
+      security: []
+      description: |
+        Public. PUBLIC looks only, newest first. A look is a suggested outfit made from catalog products.
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 50, default: 12 }
+      responses:
+        "200":
+          description: A page of looks.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [looks, pagination]
+                    properties:
+                      looks:
+                        type: array
+                        items: { $ref: "#/components/schemas/PublicLookSummary" }
+                      pagination: { $ref: "#/components/schemas/Pagination" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /looks/{slug}:
+    get:
+      tags: [Looks]
+      summary: Get a look
+      security: []
+      description: |
+        Public. Hidden looks return 404. Loaded in one aggregation: the look plus its PUBLIC products
+        (in the look's order), each trimmed to what's needed to show it and link to its product page.
+      parameters:
+        - $ref: "#/components/parameters/Slug"
+      responses:
+        "200":
+          description: The look.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [look]
+                    properties:
+                      look: { $ref: "#/components/schemas/PublicLook" }
+        "404": { $ref: "#/components/responses/LookNotFound" }
         "422": { $ref: "#/components/responses/ValidationError" }
 
   # ───────────────────────────── Cart ─────────────────────────────
@@ -821,6 +881,8 @@ paths:
         ADMIN. Any subset of details, pricing, availability, publicity and pre-order limit.
         `sku` and stock can't be changed here (unknown keys are rejected).
         PRE_ORDER → IN_STOCK with claimed spots converts them into reserved stock (stock must cover them).
+        Setting `publicityStatus: HIDDEN` also hides every PUBLIC look containing the product;
+        those looks are listed in `hiddenLooks`.
       security: [{ bearerAuth: [] }]
       requestBody:
         required: true
@@ -828,7 +890,28 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/UpdateProductInput" }
       responses:
-        "200": { $ref: "#/components/responses/AdminProduct" }
+        "200":
+          description: The product, and any looks hidden along with it.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [product, hiddenLooks]
+                    properties:
+                      product: { $ref: "#/components/schemas/AdminProduct" }
+                      hiddenLooks:
+                        type: array
+                        description: Looks that were public and are now hidden because this product was hidden.
+                        items:
+                          type: object
+                          required: [id, name]
+                          properties:
+                            id: { $ref: "#/components/schemas/ObjectId" }
+                            name: { type: string }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/ProductNotFound" }
@@ -938,6 +1021,167 @@ paths:
         "404":
           description: "`PRODUCT_NOT_FOUND` | `PRODUCT_IMAGE_NOT_FOUND`"
           content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  /admin/looks:
+    get:
+      tags: [Admin · Looks]
+      summary: List all looks
+      description: ADMIN. Includes hidden looks. Search matches the name.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Limit20"
+        - name: search
+          in: query
+          schema: { type: string, maxLength: 100 }
+        - name: publicityStatus
+          in: query
+          schema: { $ref: "#/components/schemas/PublicityStatus" }
+      responses:
+        "200":
+          description: A page of looks.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [looks, pagination]
+                    properties:
+                      looks:
+                        type: array
+                        items: { $ref: "#/components/schemas/AdminLookSummary" }
+                      pagination: { $ref: "#/components/schemas/Pagination" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+    post:
+      tags: [Admin · Looks]
+      summary: Create a look
+      description: ADMIN. New looks are HIDDEN with no image. Slug defaults to a slug of the name.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateLookInput" }
+      responses:
+        "201": { $ref: "#/components/responses/AdminLook" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404":
+          description: "`PRODUCT_NOT_FOUND` — `details.skus` lists the SKUs that don't exist."
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "409":
+          description: "`SLUG_ALREADY_EXISTS`"
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /admin/looks/by-slug/{slug}:
+    parameters:
+      - $ref: "#/components/parameters/Slug"
+    get:
+      tags: [Admin · Looks]
+      summary: Get a look by slug
+      description: ADMIN. Includes hidden looks, and all of their products (hidden ones too).
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200": { $ref: "#/components/responses/AdminLook" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/LookNotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /admin/looks/{id}:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    get:
+      tags: [Admin · Looks]
+      summary: Get a look
+      description: ADMIN.
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200": { $ref: "#/components/responses/AdminLook" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/LookNotFound" }
+    patch:
+      tags: [Admin · Looks]
+      summary: Update a look
+      description: |
+        ADMIN. Any subset of details, publicity and products. `productSkus` replaces the whole list.
+        A look that is — or becomes — PUBLIC needs at least one product, every product PUBLIC, and
+        its image. Hiding a product automatically hides its public looks.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateLookInput" }
+      responses:
+        "200": { $ref: "#/components/responses/AdminLook" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404":
+          description: |
+            `LOOK_NOT_FOUND` | `PRODUCT_NOT_FOUND` — `details.skus` lists the SKUs that don't exist.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "409":
+          description: |
+            `SLUG_ALREADY_EXISTS` | `LOOK_NOT_PUBLISHABLE` — the look can't be public: no products,
+            no image, or hidden products (`details.hiddenProducts: [{ sku, name }]`).
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /admin/looks/{id}/image:
+    post:
+      tags: [Admin · Looks]
+      summary: Upload the look's image
+      description: >
+        ADMIN. One JPEG (checked by declared type and file signature), at most 10 MB. The image is staged and
+        uploaded to the image host by the worker, so the response is `202`; it replaces the look's image (the
+        previous one is deleted from the host) once processing finishes, usually within seconds.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/Id"
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [image]
+              properties:
+                image: { type: string, format: binary, contentMediaType: image/jpeg }
+      responses:
+        "202":
+          description: Accepted — the upload is queued for processing.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [upload]
+                    properties:
+                      upload:
+                        type: object
+                        required: [id, lookId, status]
+                        properties:
+                          id: { $ref: "#/components/schemas/ObjectId" }
+                          lookId: { $ref: "#/components/schemas/ObjectId" }
+                          status: { type: string, enum: [PROCESSING] }
+        "400":
+          description: "`INVALID_UPLOAD` — no file, not a JPEG, more than one file, or over 10 MB."
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/LookNotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
 
   # ───────────────────────────── Admin · Orders ─────────────────────────────
   /admin/orders:
@@ -1565,6 +1809,22 @@ components:
                 required: [product]
                 properties:
                   product: { $ref: "#/components/schemas/AdminProduct" }
+    LookNotFound:
+      description: "`LOOK_NOT_FOUND`"
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    AdminLook:
+      description: The look.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [data]
+            properties:
+              data:
+                type: object
+                required: [look]
+                properties:
+                  look: { $ref: "#/components/schemas/AdminLook" }
     AdminOrder:
       description: The order.
       content:
@@ -1670,6 +1930,9 @@ components:
         - PRODUCT_STOCK_ADJUSTED
         - PRODUCT_IMAGES_ADDED
         - PRODUCT_IMAGE_REMOVED
+        - LOOK_CREATED
+        - LOOK_UPDATED
+        - LOOK_IMAGE_UPDATED
         - ORDER_SHIPPED
         - ORDER_DELIVERED
         - ORDER_CANCELLED_BY_ADMIN
@@ -2022,6 +2285,107 @@ components:
           description: Signed change to physical stock, e.g. 20 received or -2 damaged. Can't be 0.
           examples: [20]
         reason: { type: string, maxLength: 200, examples: [Restock from supplier] }
+
+    # --- Looks ---
+    LookProduct:
+      type: object
+      description: A product in a look, trimmed to what's needed to show it and link to its page (`/products/{slug}`).
+      required: [sku, name, slug, imageUrl]
+      properties:
+        sku: { type: string }
+        name: { type: string }
+        slug: { type: string }
+        imageUrl: { type: [string, "null"], format: uri, description: The product's first image. }
+    PublicLookSummary:
+      type: object
+      required: [id, name, slug, description, imageUrl, productCount]
+      properties:
+        id: { $ref: "#/components/schemas/ObjectId" }
+        name: { type: string }
+        slug: { type: string }
+        description: { type: string }
+        imageUrl: { type: [string, "null"], format: uri }
+        productCount: { type: integer }
+    PublicLook:
+      type: object
+      required: [id, name, slug, description, imageUrl, products]
+      properties:
+        id: { $ref: "#/components/schemas/ObjectId" }
+        name: { type: string }
+        slug: { type: string }
+        description: { type: string }
+        imageUrl: { type: [string, "null"], format: uri }
+        products:
+          type: array
+          description: PUBLIC products only, in the look's order.
+          items: { $ref: "#/components/schemas/LookProduct" }
+    AdminLookSummary:
+      type: object
+      required: [id, name, slug, description, imageUrl, productCount, publicityStatus, createdAt, updatedAt]
+      properties:
+        id: { $ref: "#/components/schemas/ObjectId" }
+        name: { type: string }
+        slug: { type: string }
+        description: { type: string }
+        imageUrl: { type: [string, "null"], format: uri }
+        productCount: { type: integer }
+        publicityStatus: { $ref: "#/components/schemas/PublicityStatus" }
+        createdAt: { $ref: "#/components/schemas/DateTime" }
+        updatedAt: { $ref: "#/components/schemas/DateTime" }
+    AdminLook:
+      type: object
+      required: [id, name, slug, description, publicityStatus, imageUrl, products, createdAt, updatedAt]
+      properties:
+        id: { $ref: "#/components/schemas/ObjectId" }
+        name: { type: string }
+        slug: { type: string }
+        description: { type: string }
+        publicityStatus: { $ref: "#/components/schemas/PublicityStatus" }
+        imageUrl: { type: [string, "null"], format: uri, description: Null until an image is uploaded. }
+        products:
+          type: array
+          description: Every product (hidden ones too), in the look's order.
+          items:
+            allOf:
+              - $ref: "#/components/schemas/LookProduct"
+              - type: object
+                required: [publicityStatus]
+                properties:
+                  publicityStatus: { $ref: "#/components/schemas/PublicityStatus" }
+        createdAt: { $ref: "#/components/schemas/DateTime" }
+        updatedAt: { $ref: "#/components/schemas/DateTime" }
+    CreateLookInput:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, minLength: 2, maxLength: 120 }
+        slug:
+          allOf: [{ $ref: "#/components/schemas/Slug" }]
+          description: Defaults to a slug of the name.
+        description: { type: string, maxLength: 5000, default: "" }
+        productSkus:
+          type: array
+          maxItems: 10
+          uniqueItems: true
+          default: []
+          description: Uppercased by the server. Every SKU must exist.
+          items: { type: string, pattern: "^[A-Za-z0-9-]{3,32}$" }
+    UpdateLookInput:
+      type: object
+      description: Any subset (at least one field). Unknown keys are rejected. The image has its own endpoint.
+      minProperties: 1
+      additionalProperties: false
+      properties:
+        name: { type: string, minLength: 2, maxLength: 120 }
+        slug: { $ref: "#/components/schemas/Slug" }
+        description: { type: string, maxLength: 5000 }
+        publicityStatus: { $ref: "#/components/schemas/PublicityStatus" }
+        productSkus:
+          type: array
+          description: Replaces the look's products, in display order. Uppercased by the server.
+          maxItems: 10
+          uniqueItems: true
+          items: { type: string, pattern: "^[A-Za-z0-9-]{3,32}$" }
 
     # --- Cart ---
     CartItem:

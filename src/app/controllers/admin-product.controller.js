@@ -62,16 +62,16 @@ export const createProduct = async (req, res) => {
  * PATCH /admin/products/:id — updates product details.
  * @param {import("express").Request} req - Express request.
  * @param {import("express").Response} res - Express response.
- * @returns {Promise<import("express").Response>} 200 with the product.
+ * @returns {Promise<import("express").Response>} 200 with the product and any looks hidden with it.
  */
 export const updateProduct = async (req, res) => {
-  const product = await updateProductHandler({
+  const { product, hiddenLooks } = await updateProductHandler({
     productId: req.validated.params.id,
     changes: req.validated.body,
     adminId: req.user.id,
     context: getRequestContext(req),
   });
-  return res.status(200).json({ data: { product } });
+  return res.status(200).json({ data: { product, hiddenLooks } });
 };
 
 /**
